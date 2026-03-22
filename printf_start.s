@@ -1,12 +1,12 @@
-
+; MY ASSEMBLY PRINTF IMPLEMENTATION
 ; nasm -f elf64 -l 1-nasm.lst 1-nasm.s  ;  ld -s -o 1-nasm 1-nasm.o
 
-STRING_END     equ 0x00
+STRING_END     equ 0x0
 HOT_SYMBOL     equ '%'
 START_SPEC     equ 'b'
 NUM_OF_SPEC    equ 'x' - 'b'
-TRUE           equ 0x0000000000000001
-FALSE          equ 0x0000000000000000
+TRUE           equ 1
+FALSE          equ 0
 SIGN_BIT       equ 0x80000000
 
 
@@ -29,10 +29,10 @@ global _printf
 ;
 ; Exit: string outputted to stdout
 ;------------------------------------------------------------------
-_printf:       
-                    pop r15       ; put return adress(cdecl)
+_printf:            mov qword [printed_symb], 0
+                    pop r10       ; put return adress(cdecl)
 
-                    ; rdi, rsi, rdx, rcx, r8, r9
+                    ; rdi, rsi, rdx, rcx, r8, r9 
                     push r9
                     push r8
                     push rcx
@@ -59,7 +59,7 @@ _printf:
                     pop r8
                     pop r9
 
-                    push r15  ; ret adress
+                    push r10  ; ret adress
                     ret
 ;------------------------------------------------------------------
 
@@ -74,6 +74,7 @@ _printf:
 ; Destr: rsi, rdi
 ;------------------------------------------------------------------
 printf_string:      
+
 output_loop:        cmp byte [rsi], STRING_END
                     je exit_printf
 
@@ -82,7 +83,7 @@ output_loop:        cmp byte [rsi], STRING_END
                     call process_hot_symb
                     jmp output_loop
 
-not_hot_symb:       mov byte dil, [rsi]
+not_hot_symb:       mov dil, byte [rsi]
                     call output_char
                     inc rsi
                     jmp output_loop
@@ -96,15 +97,19 @@ exit_printf:        ret
 ;
 ; Entry: rsi --> pointer to string with format specifiers
 ;        rbp - first argument for format specifiers
+;        at stack - arguments for format specifiers
 ;
 ; Exit: does not return anything
 ;
 ; Destr: rsi, rdi, r8, rbp
 ;------------------------------------------------------------------
 process_hot_symb:   inc rsi
+
                     cmp byte [rsi], '%'
                     jne process_spec
-                    mov dil, byte [rsi]
+
+incorr_or_percent:  xor rdi, rdi
+                    mov dil, '%'
                     call output_char
                     jmp exit_switch
 
@@ -113,7 +118,7 @@ process_spec:       xor rdi, rdi
                     sub dil, START_SPEC
 
                     cmp dil, NUM_OF_SPEC
-                    ja exit_switch
+                    ja incorr_or_percent
 
                     mov r8, [SwitchTable + 8*rdi]
                     jmp r8
@@ -128,7 +133,7 @@ char:               mov edi, dword [rbp]
                     call output_char
                     jmp exit_switch
 
-decimal:            movsxd rdi, dword [rbp]
+decimal:            movsxd rdi, dword [rbp] ; знаковое расширешение 4 байт из памяти по адресу rbp
                     add rbp, 8
                     call output_decimal
                     jmp exit_switch
@@ -151,7 +156,7 @@ string:             mov rdi, [rbp]
 hex:                mov edi, dword [rbp]
                     add rbp, 8
                     call output_hex
-                    jmp exit_switch      
+                    jmp exit_switch               
 
 exit_switch:        inc rsi
                     ret      
@@ -186,6 +191,8 @@ out_bin_loop:       cmp cl, 0
 
 end_bin_process:    cmp rdx, FALSE
                     jne exit_out_bin
+
+                    xor rdi, rdi
                     mov dil, '0'
                     call output_char
 
@@ -202,7 +209,7 @@ exit_out_bin:       pop rsi
 ;
 ; Destr: rax, rcx, rdx, rdi
 ;------------------------------------------------------------------
-output_decimal:     test rdi, rdi
+output_decimal:     test rdi, rdi          ; SF = 1 if digit < 0
                     jns process_positive
 
                     push rdi
@@ -264,6 +271,8 @@ out_oct_loop:       cmp cl, 0
 
 end_oct_process:    cmp rdx, FALSE
                     jne exit_out_oct
+
+                    xor rdi, rdi
                     mov dil, '0'
                     call output_char
 
@@ -305,7 +314,9 @@ out_ptr_loop:       cmp cl, 0
 
 end_ptr_process:    cmp rdx, FALSE
                     jne exit_out_ptr
-                    mov di, '0'
+
+                    xor rdi, rdi
+                    mov dil, '0'
                     call output_char
 
 exit_out_ptr:       pop rsi
@@ -319,17 +330,25 @@ exit_out_ptr:       pop rsi
 ;
 ; Exit: does not return anything
 ;
-; Destr: rcx, rdi, r10
+; Destr: rcx, rdi, r9
 ;------------------------------------------------------------------
-output_string:      mov r10, rdi
+output_string:      mov r9, rdi
                     call my_strlen  ; rcx = num of symb
 
                     test rcx, rcx
                     jz exit_out_str
+
+                    cmp rcx, buf_len - 1
+                    jb out_string_by_char
+
+                    call fflush_buffer
+                    call put_str_to_stdout
+
+                    ret
                     
-out_string_by_char: mov dil, [r10] 
+out_string_by_char: mov dil, byte [r9] 
                     call output_char
-                    inc r10
+                    inc r9
                     loop out_string_by_char 
 
 exit_out_str:       ret             
@@ -386,6 +405,8 @@ out_hex_loop:       cmp cl, 0
 
 end_hex_process:    cmp rdx, FALSE
                     jne exit_out_hex
+
+                    xor rdi, rdi
                     mov dil, '0'
                     call output_char
 
@@ -403,7 +424,7 @@ exit_out_hex:       pop rsi
 ;
 ; Destr: rdi
 ;------------------------------------------------------------------
-print_digit:        movzx rdi, byte [rsi + rdi]
+print_digit:        movzx rdi, byte [rsi + rdi] ; прочитать байт из памяти/регистра и заполнить старшие биты нулями
                     cmp dil, '0'
                     je process_zero
 
@@ -430,13 +451,12 @@ end_print_digit:    ret
 output_char:        mov r11, [curr_buf_size]
                     mov byte [buffer + r11], dil
                     inc qword [curr_buf_size]
-                    inc r11
 
                     cmp dil, 10d
                     jne continue
                     call fflush_buffer
 
-continue:           cmp r11, buf_len - 1
+continue:           cmp qword [curr_buf_size], buf_len - 1
                     jb exit_output
                     call fflush_buffer
 
@@ -482,17 +502,52 @@ fflush_buffer:      mov r11, [curr_buf_size]
                     ret
 ;------------------------------------------------------------------
 
+;------------------------------------------------------------------
+; Put data of string to stdout(using syscall)
+;
+; Entry: r9 ---> pointer to string
+;        rcx - number of symbols to write
+;
+; Exit: [printed_symb] incremented by number of symbols output to stdout
+;------------------------------------------------------------------
+put_str_to_stdout:  add [printed_symb], rcx
+
+                    push rax
+                    push rdi
+                    push rsi
+                    push rdx
+
+                    push rcx   ; ret adress in syscall
+                    push r11   ; flags in syscall
+
+                    mov rax, 0x01      ; write64
+                    mov rdi, 1         ; stdout
+                    mov rsi, r9
+                    mov rdx, rcx       ; strlen (buffer)
+                    syscall
+
+                    pop r11   ; flags in syscall
+                    pop rcx   ; ret adress in syscall
+
+                    pop rdx
+                    pop rsi
+                    pop rdi
+                    pop rax
+
+                    ret
+;------------------------------------------------------------------
+
 align 8
 SwitchTable:
                                 dq binary           ; %b
                                 dq char             ; %c
                                 dq decimal          ; %d
-            times ('o'-'d'-1)   dq exit_switch 
+            times ('o'-'d'-1)   dq incorr_or_percent
                                 dq octal            ; %o
                                 dq pointer          ; %p
-            times ('s'-'p'-1)   dq exit_switch 
+            times ('s'-'p'-1)   dq incorr_or_percent 
                                 dq string           ; %s
-            times ('x'-'s'-1)   dq exit_switch
+            times ('x'-'s'-1)   dq incorr_or_percent
                                 dq hex              ; %x
 
 section .data
