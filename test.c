@@ -14,8 +14,6 @@ int main() {
     count = _printf("Hello, World!\n");
     printf("Returned: %d\n", count);
     
-    int ret = _printf("%d %s %x %d%%%c%b %d %c %x\n", -1, "love", 3802, 100, 33, 127, 57, 63, 64);
-    // -1 love 0xeda 100%!0b1111111
     _printf("Number: %d\n", 42);
     _printf("Hex: %x\n", 123);
     printf("Hex: %x\n", 123);
