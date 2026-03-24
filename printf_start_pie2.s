@@ -9,6 +9,44 @@ PERCENT        equ '%'
 START_SPEC     equ 'b'
 NUM_OF_SPEC    equ 'x' - 'b'
 
+%macro PUSH_ARGS_REGS 0
+    push r9 
+    push r8
+    push rcx
+    push rdx
+    push rsi
+    push rdi
+%endmacro
+
+%macro POP_ARGS_REGS 0
+    pop rdi
+    pop rsi
+    pop rdx
+    pop rcx
+    pop r8
+    pop r9
+%endmacro
+
+%macro PUSH_STDCALL_USED_REGS 0
+    push rax
+    push rdi
+    push rsi
+    push rdx
+
+    push rcx   ; ret adress in syscall
+    push r11   ; flags in syscall
+%endmacro
+
+%macro POP_STDCALL_USED_REGS 0
+    pop r11   ; flags in syscall
+    pop rcx   ; ret adress in syscall
+
+    pop rdx
+    pop rsi
+    pop rdi
+    pop rax
+%endmacro
+
 section .text
 
 global _printf                 
@@ -20,13 +58,7 @@ global _printf
 _printf:            mov qword [rel printed_symb], 0
                     pop r10       ; put return adress(cdecl)
 
-                    ; rdi, rsi, rdx, rcx, r8, r9 
-                    push r9
-                    push r8
-                    push rcx
-                    push rdx
-                    push rsi
-                    push rdi
+                    PUSH_ARGS_REGS
 
                     push rbp
                     mov rbp, rsp
@@ -41,12 +73,7 @@ _printf:            mov qword [rel printed_symb], 0
 
                     pop rbp
 
-                    pop rdi
-                    pop rsi
-                    pop rdx
-                    pop rcx
-                    pop r8
-                    pop r9
+                    POP_ARGS_REGS
 
                     push r10  ; ret adress
                     ret
@@ -60,9 +87,7 @@ _printf:            mov qword [rel printed_symb], 0
 ;
 ; Exit: does not return anything
 ;
-; Func called: process_percent, output_char
-;
-; Destr: rsi, rdi, r9, rbp, r8, rdx, r11, rax, rcx
+; Destr: rsi, rdi, r9, rbp, r8, rdx, r11, rcx, rax
 ;------------------------------------------------------------------
 printf_string:      
 
@@ -70,13 +95,14 @@ printf_string:
                     je .exit_printf
 
                     cmp byte [rsi], PERCENT
-                    jne .not_hot_symb
-                    call process_percent
-                    jmp .output_loop
+                    je .percent
 
-.not_hot_symb:      movzx edi, byte [rsi]
+                    movzx edi, byte [rsi]
                     call output_char
                     inc rsi
+                    jmp .output_loop
+
+.percent:           call process_percent
                     jmp .output_loop
 
 .exit_printf:        ret                                          
@@ -92,7 +118,7 @@ printf_string:
 ;
 ; Exit: does not return anything
 ;
-; Destr: rsi, rdi, r9, rbp, r8, rdx, r11, rax, rcx
+; Destr: rsi, rdi, r9, rbp, r8, rdx, r11, rcx, rax
 ;------------------------------------------------------------------
 process_percent:    inc rsi
 
@@ -165,7 +191,7 @@ exit_switch:        inc rsi
 ;------------------------------------------------------------------
 
 ;------------------------------------------------------------------
-; Process %b format specifier
+; Process %b/%x/%o format specifier
 ;
 ; Entry:  rdi - argument for format specifier
 ;         ecx - log2(base):
@@ -177,7 +203,7 @@ exit_switch:        inc rsi
 ;
 ; Exit: does not return anything
 ;
-; Destr: rcx, rdi, r8, rdx, r11
+; Destr: rcx, rdi, r8, rdx, r11, r9
 ;------------------------------------------------------------------
 output_bin_hex_oct: test rdi, rdi
                     jz .is_zero
@@ -186,32 +212,30 @@ output_bin_hex_oct: test rdi, rdi
                     shl r8d, cl
                     sub r8d, 1
 
-                    xor edx, edx
-                    mov dl, cl
+                    movzx edx, cl 
 
                     xor ecx, ecx
                     bsr rcx, rdi                  ; старший единичный бит
-                    movzx rcx, byte [r9 + rcx]    ; получаем с какого сдвига начнать
+                    movzx ecx, byte [r9 + rcx]    ; получаем с какого сдвига начнать
                     
                     lea r9, [rel LowHexConvStr]  ; r9 = rip + offset OctConvStr
 
-.output_loop:       cmp cl, 0
-                    jl .exit_output
-
-                    push rdi
+.output_loop:       push rdi
                     shr rdi, cl
                     and rdi, r8
-                    movzx rdi, byte [r9 + rdi]  ; прочитать байт из памяти/регистра и заполнить старшие биты нулями
+                    movzx edi, byte [r9 + rdi]  ; прочитать байт из памяти/регистра и заполнить старшие биты нулями
+                    push r9
                     call output_char
+                    pop r9
 
                     pop rdi
-                    sub cl, dl
-                    jmp .output_loop
+                    sub ecx, edx
+                    jns .output_loop
+                    ret
 
 .is_zero:           mov dil, '0'
                     call output_char
-
-.exit_output:       ret
+                    ret
 ;------------------------------------------------------------------
 
 ;------------------------------------------------------------------
@@ -221,7 +245,7 @@ output_bin_hex_oct: test rdi, rdi
 ;
 ; Exit: does not return anything
 ;
-; Destr: rax, rcx, rdx, rdi, r11
+; Destr: rax, rcx, rdx, rdi, r9, r11
 ;------------------------------------------------------------------
 output_decimal:     test edi, edi          ; SF = 1 if digit < 0
                     jns .process_positive
@@ -246,19 +270,13 @@ output_decimal:     test edi, edi          ; SF = 1 if digit < 0
                     inc ecx
 
                     test eax, eax
-                    jz .output_result
-
-                    jmp .divide_loop
+                    jnz .divide_loop
 
 .output_result:     pop rdi
                     call output_char
 
                     dec ecx
-
-                    test ecx, ecx
-                    jz .exit
-
-                    jmp .output_result
+                    jnz .output_result
 
 .exit:              ret
 ;------------------------------------------------------------------
@@ -298,9 +316,16 @@ output_pointer:     test rdi, rdi
 ;
 ; Exit: does not return anything
 ;
-; Destr: rcx, rdi, r9, r11
+; Destr: rcx, rdi, r9, r11, r8
 ;------------------------------------------------------------------
-output_string:      mov r9, rdi
+output_string:      test rdi, rdi
+                    jnz .not_null
+
+                    lea r8, [rel strnul]
+                    mov rcx, nulstr_len
+                    jmp .out_str_by_char
+
+.not_null:          mov r8, rdi
                     call my_strlen  ; rcx = num of symb
 
                     test rcx, rcx
@@ -314,10 +339,12 @@ output_string:      mov r9, rdi
 
                     ret
                     
-.out_str_by_char:   movzx edi, byte [r9] 
+.out_str_by_char:   movzx edi, byte [r8] 
                     call output_char
-                    inc r9
-                    loop .out_str_by_char 
+                    inc r8
+                    dec rcx
+
+                    jnz .out_str_by_char
 
 .exit_output:       ret             
 ;------------------------------------------------------------------
@@ -328,17 +355,13 @@ output_string:      mov r9, rdi
 ; Entry: rdi - string
 ;
 ; Exit: rcx - length of string
-;
-; Destr: rax, rdi
 ;------------------------------------------------------------------
 my_strlen:          xor ecx, ecx
-                    mov al, 0x0
 
-.cmp_loop:          cmp al, byte [rdi]
-                    jz .exit
-
-                    inc rdi
+.cmp_loop:          cmp byte [rdi + rcx], 0
+                    je .exit
                     inc rcx
+
                     jmp .cmp_loop
 
 .exit:              ret
@@ -352,10 +375,9 @@ my_strlen:          xor ecx, ecx
 ;
 ; Exit: does not return anything
 ;
-; Destr: r11
+; Destr: r11, r9
 ;------------------------------------------------------------------
-output_char:        push r9
-                    mov r11, [rel curr_buf_size]
+output_char:        mov r11, [rel curr_buf_size]
                     lea r9, [rel buffer]            ; r9 = rip + offset buffer
                     mov byte [r9 + r11], dil
                     inc qword [rel curr_buf_size]
@@ -368,8 +390,7 @@ output_char:        push r9
                     jb .exit_output
                     call fflush_buffer
 
-.exit_output:       pop r9
-                    ret
+.exit_output:       ret
 ;------------------------------------------------------------------
 
 ;------------------------------------------------------------------
@@ -383,13 +404,7 @@ output_char:        push r9
 fflush_buffer:      mov r11, [rel curr_buf_size]
                     add [rel printed_symb], r11
 
-                    push rax
-                    push rdi
-                    push rsi
-                    push rdx
-
-                    push rcx   ; ret adress in syscall
-                    push r11   ; flags in syscall
+                    PUSH_STDCALL_USED_REGS
 
                     mov rax, 0x01      ; write64
                     mov rdi, 1         ; stdout
@@ -399,13 +414,7 @@ fflush_buffer:      mov r11, [rel curr_buf_size]
 
                     mov qword [rel curr_buf_size], 0
 
-                    pop r11   ; flags in syscall
-                    pop rcx   ; ret adress in syscall
-
-                    pop rdx
-                    pop rsi
-                    pop rdi
-                    pop rax
+                    POP_STDCALL_USED_REGS
 
                     ret
 ;------------------------------------------------------------------
@@ -413,34 +422,22 @@ fflush_buffer:      mov r11, [rel curr_buf_size]
 ;------------------------------------------------------------------
 ; Put data of string to stdout(using syscall)
 ;
-; Entry: r9 ---> pointer to string
+; Entry: r8 ---> pointer to string
 ;        rcx - number of symbols to write
 ;
 ; Exit: [printed_symb] incremented by number of symbols output to stdout
 ;------------------------------------------------------------------
 put_str_to_stdout:  add [rel printed_symb], rcx
 
-                    push rax
-                    push rdi
-                    push rsi
-                    push rdx
-
-                    push rcx   ; ret adress in syscall
-                    push r11   ; flags in syscall
+                    PUSH_STDCALL_USED_REGS
 
                     mov rax, 0x01      ; write64
                     mov rdi, 1         ; stdout
-                    mov rsi, r9
+                    mov rsi, r8
                     mov rdx, rcx       ; strlen (buffer)
                     syscall
 
-                    pop r11   ; flags in syscall
-                    pop rcx   ; ret adress in syscall
-
-                    pop rdx
-                    pop rsi
-                    pop rdi
-                    pop rax
+                    POP_STDCALL_USED_REGS
 
                     ret
 ;------------------------------------------------------------------
@@ -471,8 +468,10 @@ curr_buf_size dq 0
 
 ptr_   db '0x', 0x0
 ptrnul db '(nil)', 0x0
+strnul db '(null)', 0x0 
+nulstr_len equ $ - strnul - 1
 
-buffer  db 4 dup(0)
+buffer  db 10 dup(0)
 buf_len equ $ - buffer
 
 section .note.GNU-stack
