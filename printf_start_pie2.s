@@ -1,20 +1,13 @@
 ; MY ASSEMBLY PRINTF IMPLEMENTATION
-; nasm -f elf64 -o asm.o printf_start_pie.s  
-; gcc -std=c2x -o program test3.c asm.o
+; nasm -f elf64 -o asm.o printf_start_pie2.s  
+; gcc -fsanitize=address -std=c2x -o program test3.c asm.o
 
-
-; !TODO избавиться от -no-pie
+; objdump -M intel -d asm.o | less
 
 STRING_END     equ 0x0
-HOT_SYMBOL     equ '%'
+PERCENT        equ '%'
 START_SPEC     equ 'b'
 NUM_OF_SPEC    equ 'x' - 'b'
-TRUE           equ 1
-FALSE          equ 0
-SIGN_BIT       equ 0x80000000
-HEX_SHIFT      equ -4
-BIN_SHIFT      equ -2
-
 
 section .text
 
@@ -23,21 +16,6 @@ global _printf
 ;------------------------------------------------------------------
 ; Prints string using format specifiers:
 ; %b, %c, %d, %o, %p, %s, %x
-;
-; Entry(cdecl): rdi - first param  (string with format specifiers)
-;               rsi - second param (argument fot 1st format spec)
-;               rdx - third param  (argument fot 2nd format spec)
-;               rcx - 4th param    (argument fot 3d format spec)
-;               r8  - 5th param
-;               r9 - 6th param
-;   (at stack): return adress
-;               7th param
-;
-; Func called: printf_string, fflush_buffer
-;
-; Exit: string outputted to stdout
-;
-; Destr: func called destr regs
 ;------------------------------------------------------------------
 _printf:            mov qword [rel printed_symb], 0
                     pop r10       ; put return adress(cdecl)
@@ -60,6 +38,7 @@ _printf:            mov qword [rel printed_symb], 0
                     call fflush_buffer
 
                     mov rax, [rel printed_symb]
+
                     pop rbp
 
                     pop rdi
@@ -81,21 +60,21 @@ _printf:            mov qword [rel printed_symb], 0
 ;
 ; Exit: does not return anything
 ;
-; Func called: process_hot_symb, output_char
+; Func called: process_percent, output_char
 ;
-; Destr: rsi, rdi + func called destr regs
+; Destr: rsi, rdi, r9, rbp, r8, rdx, r11, rax, rcx
 ;------------------------------------------------------------------
 printf_string:      
 
 .output_loop:       cmp byte [rsi], STRING_END
                     je .exit_printf
 
-                    cmp byte [rsi], HOT_SYMBOL
+                    cmp byte [rsi], PERCENT
                     jne .not_hot_symb
-                    call process_hot_symb
+                    call process_percent
                     jmp .output_loop
 
-.not_hot_symb:      mov dil, byte [rsi]
+.not_hot_symb:      movzx edi, byte [rsi]
                     call output_char
                     inc rsi
                     jmp .output_loop
@@ -113,50 +92,53 @@ printf_string:
 ;
 ; Exit: does not return anything
 ;
-; Func called: output_binary, output_char, output_decimal, output_octal, 
-;              output_pointer, output_string, output_hex
-;
-; Destr: rsi, rdi, r8, rbp + func called destr regs
+; Destr: rsi, rdi, r9, rbp, r8, rdx, r11, rax, rcx
 ;------------------------------------------------------------------
-process_hot_symb:   inc rsi
+process_percent:    inc rsi
 
-                    cmp byte [rsi], '%'
+                    cmp byte [rsi], PERCENT
                     jne process_spec
 
-incorr_or_percent:  xor rdi, rdi
-                    mov dil, '%'
+incorr_or_percent:  mov edi, PERCENT
+
                     call output_char
                     jmp exit_switch
 
-process_spec:       xor rdi, rdi
-                    mov dil, byte [rsi]
+process_spec:       movzx edi, byte [rsi] 
                     sub dil, START_SPEC
 
                     cmp dil, NUM_OF_SPEC
                     ja incorr_or_percent
 
                     lea r9, [rel SwitchTable]     ; r9 = rip + offset SwitchTable
-                    mov r8, [r9 + 8*rdi]
-                    jmp r8
+                    jmp [r9 + 8*rdi]
 
 binary:             mov edi, dword [rbp]
                     add rbp, 8
-                    call output_binary
+
+                    lea r9, [rel BinShiftTable]  
+                    mov ecx, 1
+                    call output_bin_hex_oct
+
                     jmp exit_switch
 
 char:               mov edi, dword [rbp]
-                    add rbp, 8
+                    add rbp, 8 
                     call output_char
                     jmp exit_switch
 
-decimal:            movsxd rdi, dword [rbp] ; знаковое расширешение 4 байт из памяти по адресу rbp
+decimal:            mov edi, dword [rbp] 
                     add rbp, 8
                     call output_decimal
                     jmp exit_switch
 
 octal:              mov edi, dword [rbp]
                     add rbp, 8
-                    call output_octal
+
+                    lea r9, [rel OctShiftTable]  
+                    mov ecx, 3
+                    call output_bin_hex_oct
+
                     jmp exit_switch
 
 pointer:            mov rdi, [rbp]
@@ -171,7 +153,11 @@ string:             mov rdi, [rbp]
 
 hex:                mov edi, dword [rbp]
                     add rbp, 8
-                    call output_hex
+
+                    lea r9, [rel HexShiftTable]  
+                    mov ecx, 4
+                    call output_bin_hex_oct
+
                     jmp exit_switch               
 
 exit_switch:        inc rsi
@@ -182,33 +168,44 @@ exit_switch:        inc rsi
 ; Process %b format specifier
 ;
 ; Entry:  rdi - argument for format specifier
+;         ecx - log2(base):
+;               1 -> binary (base 2)
+;               3 -> octal  (base 8)
+;               4 -> hex    (base 16)
+;         r9 ---> pointer to shift table that maps highest set bit index
+;               to initial shift (BinShiftTable / OctShiftTable / HexShiftTable)
 ;
 ; Exit: does not return anything
 ;
-; Func called: output_char
-;
-; Destr: rcx, rdi + func called destr regs
+; Destr: rcx, rdi, r8, rdx, r11
 ;------------------------------------------------------------------
-output_binary:      
-                    test rdi, rdi
+output_bin_hex_oct: test rdi, rdi
                     jz .is_zero
 
-                    xor rcx, rcx
-                    bsr ecx, edi      ; старший единичный бит
-                    and ecx, BIN_SHIFT
+                    mov r8d, 1
+                    shl r8d, cl
+                    sub r8d, 1
+
+                    xor edx, edx
+                    mov dl, cl
+
+                    xor ecx, ecx
+                    bsr rcx, rdi                  ; старший единичный бит
+                    movzx rcx, byte [r9 + rcx]    ; получаем с какого сдвига начнать
+                    
+                    lea r9, [rel LowHexConvStr]  ; r9 = rip + offset OctConvStr
 
 .output_loop:       cmp cl, 0
                     jl .exit_output
 
                     push rdi
-                    shr edi, cl
-                    and edi, 0b1
-                    lea r9, [rel BinConvStr]            ; r9 = rip + offset BinConvStr
+                    shr rdi, cl
+                    and rdi, r8
                     movzx rdi, byte [r9 + rdi]  ; прочитать байт из памяти/регистра и заполнить старшие биты нулями
                     call output_char
 
                     pop rdi
-                    sub cl, 1
+                    sub cl, dl
                     jmp .output_loop
 
 .is_zero:           mov dil, '0'
@@ -224,80 +221,46 @@ output_binary:
 ;
 ; Exit: does not return anything
 ;
-; Func called: output_char
-;
-; Destr: rax, rcx, rdx, rdi + func called destr regs
+; Destr: rax, rcx, rdx, rdi, r11
 ;------------------------------------------------------------------
-output_decimal:     test rdi, rdi          ; SF = 1 if digit < 0
+output_decimal:     test edi, edi          ; SF = 1 if digit < 0
                     jns .process_positive
 
                     push rdi
-                    xor rdi, rdi
-                    mov dil, '-'
+                    mov edi, '-'
                     call output_char
                     pop rdi
-                    neg rdi
 
-.process_positive:  mov r9, 10    ; r9 = delitel
-                    mov rax, rdi  ; rax = digit
-                    xor rcx, rcx  ; rcx = 0 (for symbols count)
+                    neg edi
 
-.divide_loop:       xor rdx, rdx
+.process_positive:  mov r9d, 10
+                    mov eax, edi  ; rax = digit
+                    xor ecx, ecx  ; rcx = 0 (for symbols count)
 
-                    div r9        ; частное - rax, остаток rdx
-                    add rdx, '0'
+.divide_loop:       xor edx, edx
+  
+                    div r9d     ; частное - rax, остаток rdx
+
+                    add edx, '0'
                     push rdx
-                    inc rcx
+                    inc ecx
 
-                    test rax, rax
+                    test eax, eax
                     jz .output_result
 
                     jmp .divide_loop
 
 .output_result:     pop rdi
                     call output_char
-                    loop .output_result
 
-                    ret
-;------------------------------------------------------------------
+                    dec ecx
 
-;------------------------------------------------------------------
-; Process %o format specifier
-;
-; Entry: rdi - argument for format specifier
-;
-; Exit: does not return anything
-;
-; Func called: output_char
-;
-; Destr: rcx, rdi + func called destr regs
-;------------------------------------------------------------------
-output_octal:       test rdi, rdi
-                    jz .is_zero
+                    test ecx, ecx
+                    jz .exit
 
-                    xor rcx, rcx
-                    bsr ecx, edi
-                    lea r9, [rel OctShiftTable]            ; r9 = rip + offset OctShiftTable 
-                    movzx ecx, byte [r9 + rcx]
+                    jmp .output_result
 
-.output_loop:       cmp cl, 0
-                    jl .exit_output
-
-                    push rdi
-                    shr edi, cl
-                    and edi, 0b111
-                    lea r9, [rel OctConvStr]            ; r9 = rip + offset OctConvStr
-                    movzx rdi, byte [r9 + rdi]  ; прочитать байт из памяти/регистра и заполнить старшие биты нулями
-                    call output_char
-
-                    pop rdi
-                    sub cl, 3
-                    jmp .output_loop
-
-.is_zero:           mov dil, '0'
-                    call output_char
-
-.exit_output:       ret
+.exit:              ret
 ;------------------------------------------------------------------
 
 ;------------------------------------------------------------------
@@ -307,38 +270,23 @@ output_octal:       test rdi, rdi
 ;
 ; Exit: does not return anything
 ;
-; Func called: output_char, output_string
-;
-; Destr: rcx, rdi + func called destr regs
+; Destr: rcx, rdi, r9, r11, rdx, r8
 ;------------------------------------------------------------------
-output_pointer:     push rdi
+output_pointer:     test rdi, rdi
+                    jnz .not_zero
+
+                    lea rdi, [rel ptrnul]
+                    call output_string
+                    ret
+
+.not_zero:          push rdi
                     lea rdi, [rel ptr_]
                     call output_string
                     pop rdi
 
-                    test rdi, rdi
-                    jz .is_zero
-
-                    xor rcx, rcx
-                    bsr rcx, rdi
-                    and rcx, HEX_SHIFT
-
-.output_loop:       cmp cl, 0
-                    jl .exit_output
-
-                    push rdi
-                    shr rdi, cl
-                    and rdi, 0b1111
-                    lea r9, [rel HighHexConvStr]            ; r9 = rip + offset HighHexConvStr
-                    movzx rdi, byte [r9 + rdi]  ; прочитать байт из памяти/регистра и заполнить старшие биты нулями
-                    call output_char
-
-                    pop rdi
-                    sub cl, 4
-                    jmp .output_loop
-
-.is_zero:           mov dil, '0'
-                    call output_char
+                    lea r9, [rel HexShiftTable]  
+                    mov ecx, 4
+                    call output_bin_hex_oct
 
 .exit_output:       ret
 ;-----------------------------------------------------------------
@@ -350,9 +298,7 @@ output_pointer:     push rdi
 ;
 ; Exit: does not return anything
 ;
-; Func called: output_char, my_strlen
-;
-; Destr: rcx, rdi, r9 + func called destr regs
+; Destr: rcx, rdi, r9, r11
 ;------------------------------------------------------------------
 output_string:      mov r9, rdi
                     call my_strlen  ; rcx = num of symb
@@ -368,7 +314,7 @@ output_string:      mov r9, rdi
 
                     ret
                     
-.out_str_by_char:   mov dil, byte [r9] 
+.out_str_by_char:   movzx edi, byte [r9] 
                     call output_char
                     inc r9
                     loop .out_str_by_char 
@@ -385,68 +331,28 @@ output_string:      mov r9, rdi
 ;
 ; Destr: rax, rdi
 ;------------------------------------------------------------------
-my_strlen:          xor rcx, rcx
-                    dec rcx
-
+my_strlen:          xor ecx, ecx
                     mov al, 0x0
 
-                    repne scasb    ; while(rdi!=al){rdi++}
+.cmp_loop:          cmp al, byte [rdi]
+                    jz .exit
 
-                    not rcx 
-                    dec rcx
-                    ret
+                    inc rdi
+                    inc rcx
+                    jmp .cmp_loop
+
+.exit:              ret
 ;------------------------------------------------------------------
 
 
 ;------------------------------------------------------------------
-; Process %x format specifier
-;
-; Entry: rdi - argument for format specifier
-;
-; Exit: does not return anything
-;
-; Func called: output_char
-;
-; Destr: rcx, rdi + func called destr regs
-;------------------------------------------------------------------
-output_hex:         
-                    test rdi, rdi
-                    jz .is_zero
-
-                    xor rcx, rcx
-                    bsr ecx, edi        ; найти первый единичный бит в числе
-                    and ecx, HEX_SHIFT
-
-.output_loop:       cmp cl, 0
-                    jl .exit_output
-
-                    push rdi
-                    shr edi, cl
-                    and edi, 1111b
-                    lea r9, [rel LowHexConvStr]            ; r9 = rip + offset LowHexConvStr
-                    movzx rdi, byte [r9 + rdi]  ; прочитать байт из памяти/регистра и заполнить старшие биты нулями
-                    call output_char
-
-                    pop rdi
-                    sub cl, 4
-                    jmp .output_loop
-
-.is_zero:           mov dil, '0'
-                    call output_char
-
-.exit_output:       ret
-;------------------------------------------------------------------
-
-;------------------------------------------------------------------
-; Put char to buffer and check buffer overflow
+; Put char to buffer and check buffer overflow (line-buffered)
 ;
 ; Entry: dil - char for output
 ;
 ; Exit: does not return anything
 ;
-; Func called: fflush_buffer
-;
-; Destr: r11 + func called destr regs
+; Destr: r11
 ;------------------------------------------------------------------
 output_char:        push r9
                     mov r11, [rel curr_buf_size]
@@ -555,18 +461,18 @@ SwitchTable:
                                 dq hex              ; %x
 
 LowHexConvStr  db "0123456789abcdef"
-HighHexConvStr db "0123456789ABCDEF"
-BinConvStr     db "01"
-OctConvStr     db "01234567"
-OctShiftTable  db 0,0,0,3,3,3,6,6,6,9,9,9,12,12,12,15,15,15,18,18,18,21,21,21,24,24,24,27,27,27,30,30
+BinShiftTable  db 0,0,2,2,4,4,6,6,8,8,10,10,12,12,14,14,16,16,18,18,20,20,22,22,24,24,26,26,28,28,30,30
+OctShiftTable  db 0,0,0,3,3,3,6,6,6,9, 9, 9,12,12,12,15,15,15,18,18,18,21,21,21,24,24,24,27,27,27,30,30
+HexShiftTable  db 0,0,0,0,4,4,4,4,8,8,8,8,12,12,12,12,16,16,16,16,20,20,20,20,24,24,24,24,28,28,28,28,32,32,32,32,36,36,36,36,40,40,40,40,44,44,44,44,48,48,48,48,52,52,52,52,56,56,56,56,60,60,60,60,64
 
 printed_symb dq 0
 
 curr_buf_size dq 0
 
-ptr_ db '0x', 0x0
+ptr_   db '0x', 0x0
+ptrnul db '(nil)', 0x0
 
-buffer  db 10 dup(0)
+buffer  db 4 dup(0)
 buf_len equ $ - buffer
 
 section .note.GNU-stack
